@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 
 #ifndef CYAMLDEF
 #ifdef CYAMLSTATIC
@@ -35,23 +36,17 @@
 CYAMLDEF const char *
 cyaml_error_pop(void);
 
-typedef struct cyaml_item_t {
-	size_t size;
-	size_t capacity;
-	char *data;
-} cyaml_item_t;
-
 typedef struct cyaml_list_t {
 	size_t size;
 	size_t capacity;
-	struct cyaml_item_t *key;
+	char *key;
 	struct cyaml_list_t *values;
 } cyaml_list_t;
 
 typedef struct cyaml_dict_t {
 	size_t size;
 	size_t capacity;
-	cyaml_list_t *lists;
+	cyaml_list_t **lists;
 } cyaml_dict_t;
 
 typedef enum cyaml_loc_t {
@@ -168,15 +163,131 @@ cyaml_read_file(char *src, size_t n)
 	return buffer;
 }
 
+#define CYAML_DICT_DEFAULT_CAPACITY (4)
+
+static cyaml_dict_t *
+cyaml_dict_create(void)
+{
+	cyaml_dict_t *dict;
+	dict = malloc(sizeof(*dict));
+	if (!dict) {
+		cyaml_log_message("Failed to allocate yaml dictionary!");
+		return NULL;
+	}
+
+	dict->size = 0;
+	dict->capacity = CYAML_DICT_DEFAULT_CAPACITY;
+	dict->lists = calloc(CYAML_DICT_DEFAULT_CAPACITY, sizeof(*dict->lists));
+	if (!dict->lists) {
+		cyaml_log_message("Failed to allocate yaml dictionary!");
+		free(dict);
+		return NULL;
+	}
+	return dict;
+}
+
+static int
+cyaml_dict_resize(cyaml_dict_t *dict)
+{
+	size_t new_capacity;
+	cyaml_list_t **new_lists;
+	new_capacity = dict->capacity * 2;
+
+	new_lists = realloc(dict->lists, new_capacity * sizeof(*new_lists));
+	if (!new_lists) {
+		cyaml_log_message("Failed to resize yaml dictionary!");
+		return -1;
+	}
+
+	dict->lists = new_lists;
+	dict->capacity = new_capacity;
+	return 0;
+}
+
+static int
+cyaml_dict_insert(cyaml_dict_t *dict, cyaml_list_t *list)
+{
+	if (dict->size == dict->capacity) {
+		if (cyaml_dict_resize(dict) != 0) {
+			return -1;
+		}
+	}
+
+	dict->lists[dict->size++] = list;
+	return 0;
+}
+
+static int
+cyaml_parse_key(cyaml_dict_t *dict, char *parent, char *buffer)
+{
+	char *key;
+	char *p = buffer;
+	p += strcspn(p, ":\r\t\n ");
+
+	key = strndup(buffer, (size_t) (p-buffer));
+	if (!key) {
+		cyaml_log_message("Ran out of memory!");
+		return -1;
+	}
+
+	printf("Key: %s\n", key);
+	
+	p += strcspn(p, ":");
+	if (*p != ':') {
+		cyaml_log_message("Expected ':' after key '%.*s'",
+				  (size_t) (p-buffer), buffer);
+		return -1;
+	}
+
+	if (isalpha(*p)) {
+		if (cyaml_parse_key(dict, p) != 0) {
+			cyaml_dict_free(dict);
+			dict = NULL;
+			break;
+		}
+	} else if (*p == '"') {
+		if (cyaml_parse_string(dict, p) != 0) {
+			cyaml_dict_free(dict);
+			dict = NULL;
+			break;
+		}
+	} else {
+		cyaml_log_message("Invalid yaml syntax!");
+		cyaml_dict_free(dict);
+		dict = NULL;
+		break;
+	}
+	
+	p++;
+	p += strspn(p, "\t\n\r ");
+	if (*p == '-') {
+		cyaml_parse_list(dict, key, p);
+	} else if (isalpha(*p)) {
+		if (cyaml_parse_symbol(dict, key, p)
+	} else if (*p == '"') {
+	}
+	return -1;
+}
+
+static int
+cyaml_parse_string(cyaml_dict_t *dict, char *p)
+{
+	printf("%s\n", p);
+	return -1;
+}
+
 CYAMLDEF cyaml_dict_t *
 cyaml_parse(char *src, size_t n, cyaml_loc_t loc)
 {
-	char *buffer;
+	char *buffer, *p;
 	cyaml_dict_t *dict;
 	if (src == NULL || n <= 0) {
 		cyaml_log_message("String is empty!");
 		return NULL;
 	}
+
+	dict = cyaml_dict_create();
+	if (!dict) return NULL;
 	
 	if (loc == CYAML_LOC_DISK) {
 		buffer = cyaml_read_file(src, n);
@@ -184,7 +295,34 @@ cyaml_parse(char *src, size_t n, cyaml_loc_t loc)
 		buffer = strndup(src, n);
 	}
 
-	dict = NULL;
+	if (!buffer) {
+		free(dict);
+		return NULL;
+	}
+
+	p = buffer;
+	p += strspn(p, "\t\n\r ");
+	while (*p != '\0') {
+		if (isalpha(*p)) {
+			if (cyaml_parse_key(dict, NULL, p) != 0) {
+				cyaml_dict_free(dict);
+				dict = NULL;
+				break;
+			}
+		} else if (*p == '"') {
+			if (cyaml_parse_string(dict, p) != 0) {
+				cyaml_dict_free(dict);
+				dict = NULL;
+				break;
+			}
+		} else {
+			cyaml_log_message("Invalid yaml syntax!");
+			cyaml_dict_free(dict);
+			dict = NULL;
+			break;
+		}
+		p += strspn(p, "\t\n\r ");
+	}
 
 	free(buffer);
 	return dict;
