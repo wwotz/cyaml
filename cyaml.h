@@ -2,9 +2,9 @@
  * @author wwotz (wwotz12@gmail.com)
  * @file cyaml.h
  * @description A single header yaml parser.
- * @instructions add '#define CYAML_IMPLEMENTATION' to the start of the
- * file that you want to include the source into like
- * this:
+ * @instructions add '#define CYAML_IMPLEMENTATION' to the
+ * start of the file that you want to include the source into
+ * like this:
  *
  * `#define CYAML_IMPLEMENTATION
  *  #include "cyaml.h"`
@@ -14,12 +14,10 @@
 #ifndef CYAML_H_
 #define CYAML_H_
 
-#include <stddef.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
 #include <ctype.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #ifndef CYAMLDEF
 #ifdef CYAMLSTATIC
@@ -29,39 +27,59 @@
 #endif /* CYAMLSTATIC */
 #endif /* CYAMLDEF */
 
+#if !defined(CYAML_MALLOC) || !defined(CYAML_REALLOC) || !defined(CYAML_CALLOC) || !defined(CYAML_FREE)
+#define CYAML_MALLOC(sz) malloc(sz)
+#define CYAML_REALLOC(x, newsz) realloc(x, newsz)
+#define CYAML_CALLOC(nmemb, size) calloc(nmemb, size)
+#define CYAML_FREE(x) free(x)
+#endif
+
 #define CYAML_LOG_MESSAGE_CAPACITY (256) /* maximum capacity of a message reported by cyaml */
 #define CYAML_LOG_STACK_CAPACITY   (20)  /* maximum life span of a message in the cyaml logging
-					 *  system */
+					  *  system */
 
-CYAMLDEF const char *
-cyaml_error_pop(void);
-
-typedef struct cyaml_list_t {
+typedef struct cyaml_t {
 	size_t size;
 	size_t capacity;
-	char *key;
-	struct cyaml_list_t *values;
-} cyaml_list_t;
+	struct cyaml_dict_t *data;
+} cyaml_t;
+
+typedef struct cyaml_trie_t {
+	char character;
+	struct cyaml_trie_t *left;
+	struct cyaml_trie_t *children;
+	struct cyaml_trie_t *right;
+
+	size_t size;
+	size_t capacity;
+	struct cyaml_cyaml_t *lists;
+} cyaml_trie_t;
 
 typedef struct cyaml_dict_t {
-	size_t size;
-	size_t capacity;
-	cyaml_list_t **lists;
+	enum cyaml_storage_type {
+		CYAML_STORAGE_LIST,
+		CYAML_STORAGE_MAPPING
+	} type;
+
+	union {
+		struct cyaml_t *keys;
+		struct trie_t *list;
+	} storage;
 } cyaml_dict_t;
 
 typedef enum cyaml_loc_t {
 	CYAML_LOC_MEMORY,
-	CYAML_LOC_DISK,
+	CYAML_LOC_DISK
 } cyaml_loc_t;
 
-CYAMLDEF cyaml_dict_t *
-cyaml_parse(char *src, size_t n, cyaml_loc_t loc);
+CYAMLDEF cyaml_t *
+cyaml_parse(char *s, size_t n, cyaml_loc_t loc);
 
-CYAMLDEF cyaml_list_t *
-cyaml_lookup(cyaml_dict_t *dict, char *src, size_t n);
+CYAMLDEF cyaml_t *
+cyaml_lookup(cyaml_t *cyaml, char *path);
 
 CYAMLDEF void
-cyaml_dict_free(cyaml_dict_t *dict);
+cyaml_free(cyaml_t *cyaml);
 
 #ifdef CYAML_IMPLEMENTATION
 
@@ -74,7 +92,7 @@ static char cyaml_log_stack[CYAML_LOG_STACK_CAPACITY][CYAML_LOG_MESSAGE_CAPACITY
 static size_t cyaml_log_stack_ptr;
 static size_t cyaml_log_stack_size;
 
-#define CYAML_LOG_MESSAGE(fmt, ...) \
+#define CYAML_LOG_MESSAGE(fmt, ...)				\
 	cyaml_log_message("%s: " fmt __VA_OPT__(,) __VA_ARGS__)
 
 static inline int
@@ -119,17 +137,139 @@ cyaml_error_pop(void)
 	return "No error.";
 }
 
+
+// need to tokenize the input before hand, makes parsing it far easier.
+typedef struct cyaml_token_t {
+	enum cyaml_token_type {
+		CYAML_TOKEN_EMPTY,
+		CYAML_TOKEN_COLON,
+		CYAML_TOKEN_STRING,
+		CYAML_TOKEN_SYMBOL,
+		CYAML_TOKEN_INDENT,
+		CYAML_TOKEN_UNDENT,
+		CYAML_TOKEN_DASH,
+		CYAML_TOKEN_END,
+		CYAML_TOKEN_ERROR,
+	} type;
+	size_t len;
+	char *data;
+} cyaml_token_t;
+
+static size_t peeked;
+static cyaml_token_t peek_token;
+
+#define CYAML_TOKEN_CREATE(type, len, data) ((cyaml_token_t) { type, len, data })
+#define CYAML_EMPTY_CREATE() (CYAML_TOKEN_CREATE(CYAML_TOKEN_EMPTY, 0, NULL))
+#define CYAML_COLON_CREATE() (CYAML_TOKEN_CREATE(CYAML_TOKEN_COLON, 0, NULL))
+#define CYAML_STRING_CREATE(len, data) (CYAML_TOKEN_CREATE(CYAML_TOKEN_STRING, len, data))
+#define CYAML_SYMBOL_CREATE(len, data) (CYAML_TOKEN_CREATE(CYAML_TOKEN_SYMBOL, len, data))
+#define CYAML_INDENT_CREATE(len) (CYAML_TOKEN_CREATE(CYAML_TOKEN_INDENT, len, NULL))
+#define CYAML_UNDENT_CREATE(len) (CYAML_TOKEN_CREATE(CYAML_TOKEN_UNDENT, len, NULL))
+#define CYAML_DASH_CREATE() (CYAML_TOKEN_CREATE(CYAML_TOKEN_DASH, 0, NULL))
+#define CYAML_END_CREATE() (CYAML_TOKEN_CREATE(CYAML_TOKEN_END, 0, NULL))
+#define CYAML_ERROR_CREATE(len, data) (CYAML_TOKEN_CREATE(CYAML_TOKEN_ERROR, len, data))
+#define CYAML_TOKEN_STRINGP(token) (token.type == CYAML_TOKEN_STRING)
+#define CYAML_TOKEN_KEYP(token)    (token.type == CYAML_TOKEN_SYMBOL)
+#define CYAML_TOKEN_VALUEP(token)  (token.type == CYAML_TOKEN_STRING || token.type == CYAML_TOKEN_SYMBOL)
+#define CYAML_TOKEN_COLONP(token)  (token.type == CYAML_TOKEN_COLON)
+#define CYAML_TOKEN_INDENTP(token) (token.type == CYAML_TOKEN_INDENT)
+#define CYAML_TOKEN_UNDENTP(token) (token.type == CYAML_TOKEN_UNDENT)
+#define CYAML_TOKEN_SPACEP(token) (token.type == CYAML_TOKEN_INDENT || token.type == CYAML_TOKEN_UNDENT)
+#define CYAML_TOKEN_DASHP(token)   (token.type == CYAML_TOKEN_DASH)
+
+static size_t indent_level;
+
+static cyaml_token_t
+cyaml_token_get(char **buffer)
+{
+	cyaml_token_t token;
+	char *p = *buffer, *q;
+	if (peeked) {
+		peeked = 0;
+		return peek_token;
+	}
+	
+	if (*p == '\n') {
+		p = p + strspn(p, "\n");
+	}
+
+	if (*p == '\0') {
+		return CYAML_END_CREATE();
+	}
+	
+	if (isspace(*p)) {
+		q = p + strspn(p, " \t");
+		size_t current_indent_level = (size_t) (q-p);
+		if (current_indent_level == indent_level) {
+			token = CYAML_EMPTY_CREATE();
+		} else if (current_indent_level > indent_level) {
+			token = CYAML_INDENT_CREATE(current_indent_level);
+		} else {
+			token = CYAML_UNDENT_CREATE(current_indent_level);
+		}
+		indent_level = current_indent_level;
+		*buffer = q;
+		return token;
+	} else if (isalpha(*p)) {
+		q = p + strcspn(p, " \t\n\":-");
+		if (*q == '"') {
+			char *error = "Invalid symbol!";
+			return CYAML_ERROR_CREATE(strlen(error), error);
+		}
+		*buffer = q;
+		return CYAML_SYMBOL_CREATE((size_t)(q-p), p);
+	} else if (*p == '"') {
+		p++;
+		q = p;
+		while (*q != '"' && *q != '\0') {
+			q += strcspn(q, "\"");
+			if (*q == '\0') break;
+			if (q[-1] == '\\') {
+				q++;
+			}
+		}
+
+		if (*q == '\0') {
+			char *error = "Unterminated string!";
+			return CYAML_ERROR_CREATE(strlen(error), error);
+		}
+
+		*buffer = q + 1;
+		return CYAML_STRING_CREATE((size_t)(q-p), p);
+	} else if (*p == '-') {
+		p++;
+		*buffer = p;
+		return CYAML_DASH_CREATE();
+	} else if (*p == ':') {
+		p++;
+		*buffer = p;
+		return CYAML_COLON_CREATE();
+	}
+	
+	char *error = "Unrecognized token!";
+	return CYAML_ERROR_CREATE(strlen(error), error);
+}
+
+static cyaml_token_t
+cyaml_token_peek(char **buffer)
+{
+	char *p = *buffer;
+	peek_token = cyaml_token_get(&p);
+	peeked = 1;
+	return peek_token;
+}
+
 static inline char *
-cyaml_read_file(char *src, size_t n)
+cyaml_read_file(char *s, size_t n)
 {
 	FILE *fd;
-	char fname[n+1], *buffer;
 	size_t fsize, nread;
-	snprintf(fname, n + 1, "%.*s", n, src);
+	char fname[n+1], *buffer;
+	snprintf(fname, n + 1, "%.*s", n, s);
 	fname[n] = '\0';
 	fd = fopen(fname, "r");
 	if (!fd) {
-		cyaml_log_message("Failed to open file '%s'", fname);
+		cyaml_log_message("Failed to open file!");
 		return NULL;
 	}
 
@@ -138,211 +278,116 @@ cyaml_read_file(char *src, size_t n)
 	fseek(fd, 0, SEEK_SET);
 
 	if (fsize <= 0) {
-		cyaml_log_message("'%s' is empty!", fname);
 		fclose(fd);
+		cyaml_log_message("File was empty!");
 		return NULL;
 	}
 
 	buffer = malloc(fsize + 1);
 	if (!buffer) {
-		cyaml_log_message("Failed to allocate space for file '%s'", fname);
 		fclose(fd);
+		cyaml_log_message("Ran out of memory!");
 		return NULL;
 	}
 
 	nread = fread(buffer, sizeof(*buffer), fsize, fd);
 	if (nread != fsize) {
-		cyaml_log_message("Failed to read '%s'!", fname);
 		free(buffer);
 		fclose(fd);
+		cyaml_log_message("Failed to read file!");
 		return NULL;
 	}
-		
+
 	buffer[nread] = '\0';
 	fclose(fd);
 	return buffer;
 }
 
-#define CYAML_DICT_DEFAULT_CAPACITY (4)
-
-static cyaml_dict_t *
-cyaml_dict_create(void)
+static cyaml_t *
+cyaml_create(void)
 {
-	cyaml_dict_t *dict;
-	dict = malloc(sizeof(*dict));
-	if (!dict) {
-		cyaml_log_message("Failed to allocate yaml dictionary!");
-		return NULL;
-	}
-
-	dict->size = 0;
-	dict->capacity = CYAML_DICT_DEFAULT_CAPACITY;
-	dict->lists = calloc(CYAML_DICT_DEFAULT_CAPACITY, sizeof(*dict->lists));
-	if (!dict->lists) {
-		cyaml_log_message("Failed to allocate yaml dictionary!");
-		free(dict);
-		return NULL;
-	}
-	return dict;
-}
-
-static int
-cyaml_dict_resize(cyaml_dict_t *dict)
-{
-	size_t new_capacity;
-	cyaml_list_t **new_lists;
-	new_capacity = dict->capacity * 2;
-
-	new_lists = realloc(dict->lists, new_capacity * sizeof(*new_lists));
-	if (!new_lists) {
-		cyaml_log_message("Failed to resize yaml dictionary!");
-		return -1;
-	}
-
-	dict->lists = new_lists;
-	dict->capacity = new_capacity;
-	return 0;
-}
-
-static int
-cyaml_dict_insert(cyaml_dict_t *dict, cyaml_list_t *list)
-{
-	if (dict->size == dict->capacity) {
-		if (cyaml_dict_resize(dict) != 0) {
-			return -1;
-		}
-	}
-
-	dict->lists[dict->size++] = list;
-	return 0;
-}
-
-static int
-cyaml_parse_key(cyaml_dict_t *dict, char *parent, char *buffer)
-{
-	char *key;
-	char *p = buffer;
-	p += strcspn(p, ":\r\t\n ");
-
-	key = strndup(buffer, (size_t) (p-buffer));
-	if (!key) {
+	cyaml_t *storage;
+	storage = malloc(sizeof(*storage));
+	if (!storage) {
 		cyaml_log_message("Ran out of memory!");
-		return -1;
+		return NULL;
 	}
-
-	printf("Key: %s\n", key);
-	
-	p += strcspn(p, ":");
-	if (*p != ':') {
-		cyaml_log_message("Expected ':' after key '%.*s'",
-				  (size_t) (p-buffer), buffer);
-		return -1;
-	}
-
-	if (isalpha(*p)) {
-		if (cyaml_parse_key(dict, p) != 0) {
-			cyaml_dict_free(dict);
-			dict = NULL;
-			break;
-		}
-	} else if (*p == '"') {
-		if (cyaml_parse_string(dict, p) != 0) {
-			cyaml_dict_free(dict);
-			dict = NULL;
-			break;
-		}
-	} else {
-		cyaml_log_message("Invalid yaml syntax!");
-		cyaml_dict_free(dict);
-		dict = NULL;
-		break;
-	}
-	
-	p++;
-	p += strspn(p, "\t\n\r ");
-	if (*p == '-') {
-		cyaml_parse_list(dict, key, p);
-	} else if (isalpha(*p)) {
-		if (cyaml_parse_symbol(dict, key, p)
-	} else if (*p == '"') {
-	}
-	return -1;
 }
 
-static int
-cyaml_parse_string(cyaml_dict_t *dict, char *p)
+CYAMLDEF cyaml_t *
+cyaml_parse(char *s, size_t n, cyaml_loc_t loc)
 {
-	printf("%s\n", p);
-	return -1;
-}
-
-CYAMLDEF cyaml_dict_t *
-cyaml_parse(char *src, size_t n, cyaml_loc_t loc)
-{
+	cyaml_t *storage;
 	char *buffer, *p;
-	cyaml_dict_t *dict;
-	if (src == NULL || n <= 0) {
-		cyaml_log_message("String is empty!");
+	cyaml_token_t token, ptoken;
+	char spaces[1024];
+	if (s == NULL || n <= 0) {
 		return NULL;
 	}
 
-	dict = cyaml_dict_create();
-	if (!dict) return NULL;
-	
+	storage = cyaml_create();
+	if (!storage) {
+		
+	}
+
 	if (loc == CYAML_LOC_DISK) {
-		buffer = cyaml_read_file(src, n);
+		buffer = cyaml_read_file(s, n);
 	} else {
-		buffer = strndup(src, n);
-	}
-
-	if (!buffer) {
-		free(dict);
-		return NULL;
+		buffer = strndup(s, n);
 	}
 
 	p = buffer;
-	p += strspn(p, "\t\n\r ");
-	while (*p != '\0') {
-		if (isalpha(*p)) {
-			if (cyaml_parse_key(dict, NULL, p) != 0) {
-				cyaml_dict_free(dict);
-				dict = NULL;
-				break;
+	
+	token = cyaml_token_get(&p);
+	memset(spaces, ' ', sizeof(spaces));
+	while (token.type != CYAML_TOKEN_ERROR && token.type != CYAML_TOKEN_END) {
+		if (CYAML_TOKEN_KEYP(token)) {
+			ptoken = cyaml_token_peek(&p);
+			if (!CYAML_TOKEN_COLONP(ptoken)) {
 			}
-		} else if (*p == '"') {
-			if (cyaml_parse_string(dict, p) != 0) {
-				cyaml_dict_free(dict);
-				dict = NULL;
-				break;
-			}
-		} else {
-			cyaml_log_message("Invalid yaml syntax!");
-			cyaml_dict_free(dict);
-			dict = NULL;
-			break;
 		}
-		p += strspn(p, "\t\n\r ");
+		
+		if (token.type == CYAML_TOKEN_INDENT) {
+			printf("INDENT: '%.*s'\n", token.len, spaces);
+		} else if (token.type == CYAML_TOKEN_UNDENT) {
+			printf("UNDENT: '%.*s'\n", token.len, spaces);
+		} else if (token.type == CYAML_TOKEN_STRING) {
+			printf("String: \"%.*s\"\n", token.len, token.data);
+		} else if (token.type == CYAML_TOKEN_SYMBOL) {
+			printf("Symbol: '%.*s'\n", token.len, token.data);
+		} else if (token.type == CYAML_TOKEN_DASH) {
+			printf("DASH: '-'\n");
+		} else if (token.type == CYAML_TOKEN_COLON) {
+			printf("COLON: ':'\n");
+		}
+		token = cyaml_token_get(&p);
 	}
-
+	
 	free(buffer);
-	return dict;
+	return NULL;
 }
 
-CYAMLDEF cyaml_list_t *
-cyaml_lookup(cyaml_dict_t *dict, char *src, size_t n)
+CYAMLDEF cyaml_t *
+cyaml_lookup(cyaml_t *cyaml, char *path)
 {
+	cyaml_log_message("TODO: Implement 'cyaml_lookup'");
 	return NULL;
 }
 
 CYAMLDEF void
-cyaml_dict_free(cyaml_dict_t *dict)
+cyaml_free(cyaml_t *cyaml)
 {
-	return;
+	cyaml_log_message("TODO: Implement 'cyaml_free'");
+	return NULL;
 }
+
+#undef CYAML_TOKEN_STRINGP
+#undef CYAML_TOKEN_KEYP
+#undef CYAML_TOKEN_VALUEP
+#undef CYAML_TOKEN_COLONP
+#undef CYAML_TOKEN_INDENTP
+#undef CYAML_TOKEN_UNDENTP
+#undef CYAML_TOKEN_DASHP
 
 #endif /* CYAML_IMPLEMENTATION */
 #endif /* CYAML_H_ */
-
-
-
-
